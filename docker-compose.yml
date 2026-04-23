@@ -1,0 +1,98 @@
+version: '3.9'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Marketing Agent — Docker Compose
+#
+# Services:
+#   app     — Scheduler (node-cron → enqueues BullMQ jobs)
+#   worker  — BullMQ worker (processes jobs → runs pipeline)
+#   redis   — Job queue backend (BullMQ)
+#   minio   — Self-hosted S3-compatible object storage (public CDN for images)
+#
+# Usage:
+#   cp .env.example .env   # fill in your credentials
+#   docker-compose up -d
+#   docker-compose logs -f app worker   # watch logs
+#
+# MinIO console: http://localhost:9001  (admin / minioadmin)
+# MinIO API:     http://localhost:9000
+#
+# IMPORTANT: For Instagram to fetch images, MINIO_PUBLIC_BASE_URL in .env must
+# point to a publicly reachable URL. Use ngrok or port-forward 9000 externally.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Scheduler: fires cron → enqueues BullMQ jobs ──────────────────────────
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    command: node src/index.js
+
+  # ── Worker: processes jobs from BullMQ queue ──────────────────────────────
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./tmp:/app/tmp
+      - ./logs:/app/logs
+    command: node src/queue/worker.js
+
+  # ── Redis: BullMQ job queue backend ───────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO: self-hosted object storage (CDN for generated images) ──────────
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"    # S3 API (must be publicly accessible for Instagram)
+      - "9001:9001"    # MinIO web console
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
